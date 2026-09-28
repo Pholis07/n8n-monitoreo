@@ -23,11 +23,11 @@ Cada 5 min ─► Lista de servicios ─► Revisar URL ─► Preparar resultad
                                                                         Enviar a Signal
 ```
 
-- **postgres** (`postgres:16-alpine`): guarda los flujos, credenciales y ejecuciones de n8n. No se expone al host, solo n8n lo ve.
+- **postgres** (`postgres:17-alpine`): guarda los flujos, credenciales y ejecuciones de n8n. No se expone al host, solo n8n lo ve.
 - **n8n**: la interfaz web en `http://localhost:5678`.
 - **signal-api** ([signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)): n8n no trae un nodo de Signal, así que este contenedor ofrece una API HTTP para mandar mensajes. Solo escucha en `127.0.0.1:8080`.
 
-Todos los datos viven en volúmenes nombrados: `n8n_postgres_data`, `n8n_n8n_data` y `n8n_signal_data`.
+Todos los datos viven en volúmenes nombrados: `n8n_postgres17_data`, `n8n_n8n_data` y `n8n_signal_data`.
 
 ## Levantar el proyecto
 
@@ -57,6 +57,24 @@ Abre `http://localhost:5678` y crea tu usuario administrador.
 systemctl --user enable --now podman-restart.service
 loginctl enable-linger $USER
 ```
+
+### Si usas Podman sin root en una laptop: DNS al cambiar de red
+
+Con Podman rootless, el DNS interno de los contenedores (`aardvark-dns`) guarda los servidores DNS de la red que tenías cuando arrancó. Si después te cambias de Wi-Fi, los contenedores dejan de resolver nombres de internet (`EAI_AGAIN`) y **todos los servicios parecen caídos**, aunque no lo estén.
+
+La solución es crear un `docker-compose.override.yml` (compose lo carga solo y está en `.gitignore`) para que n8n y signal-api usen el reenviador DNS de pasta, que siempre sigue al DNS actual del sistema:
+
+```yaml
+services:
+  n8n:
+    dns:
+      - 169.254.1.1
+  signal-api:
+    dns:
+      - 169.254.1.1
+```
+
+Luego `docker compose up -d`. Con Docker normal no hace falta y no funciona, por eso no está en el `docker-compose.yml` principal.
 
 ### Si Docker Hub te bloquea las descargas
 
@@ -193,6 +211,27 @@ docker compose start n8n
 ```
 
 Guarda también una copia del `.env` en un lugar seguro (por ejemplo, tu gestor de contraseñas). Sin la `N8N_ENCRYPTION_KEY` el respaldo de la base de datos no sirve para las credenciales.
+
+## Actualizar Postgres a otra versión mayor
+
+Los datos de Postgres no son compatibles entre versiones mayores (por ejemplo de 16 a 17), así que no basta con cambiar la imagen. Así se hizo el cambio de 16 a 17 en este proyecto:
+
+```bash
+# 1. Respaldo con la versión vieja todavía corriendo
+docker compose stop n8n
+docker compose exec -T postgres pg_dump -U n8n -d n8n -Fc > backups/n8n-db-antes.dump
+
+# 2. En docker-compose.yml: cambia la imagen (postgres:17-alpine) y usa un volumen
+#    nuevo (postgres17_data) para no pisar los datos viejos
+docker compose stop postgres && docker compose rm -f postgres
+docker compose up -d postgres
+
+# 3. Restaura y levanta n8n
+docker compose exec -T postgres pg_restore -U n8n -d n8n --exit-on-error < backups/n8n-db-antes.dump
+docker compose up -d
+```
+
+El volumen viejo queda sin usar. Cuando confirmes que todo funciona, puedes borrarlo con `docker volume rm n8n_postgres_data`.
 
 ## Comandos útiles
 
