@@ -1,0 +1,160 @@
+{
+  "name": "Monitor de servicios (alertas a Signal)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a01",
+      "name": "Cada 5 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================\n// EDITA AQUI la lista de servicios a vigilar\n// ==========================================\nconst servicios = [\n  { nombre: 'Sitio web', url: 'https://ejemplo.com' },\n  { nombre: 'API interna', url: 'https://api.ejemplo.com/health' },\n  { nombre: 'Panel admin', url: 'http://192.168.1.50:8080' },\n];\n\nreturn servicios.map(s => ({ json: s }));"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a02",
+      "name": "Lista de servicios",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a03",
+      "name": "Revisar URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Junta el resultado HTTP con el nombre y URL del servicio original\nreturn $input.all().map((item, i) => {\n  const servicio = $('Lista de servicios').itemMatching(i).json;\n  const r = item.json;\n  let codigo = null;\n  let detalle;\n  if (r.error) {\n    const e = r.error;\n    detalle = typeof e === 'string' ? e : (e.code || e.message || JSON.stringify(e));\n  } else {\n    codigo = r.statusCode ?? null;\n    detalle = `código ${codigo}`;\n  }\n  return {\n    json: {\n      nombre: servicio.nombre,\n      url: servicio.url,\n      codigo,\n      detalle,\n      hayError: Boolean(r.error),\n    },\n  };\n});"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a04",
+      "name": "Preparar resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7d1c9a52-1111-4b2a-9c3d-5e6f7a8b9c01",
+              "leftValue": "={{ $json.hayError || !($json.codigo >= 200 && $json.codigo < 300) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a05",
+      "name": "¿Está caído?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Solo deja pasar los servicios que ANTES estaban arriba (o que nunca se habían revisado)\n// Nota: el Static Data solo se guarda en ejecuciones de produccion (flujo activo)\nconst estado = $getWorkflowStaticData('global');\nconst salida = [];\nfor (const item of $input.all()) {\n  const { nombre, url, detalle } = item.json;\n  if (estado[url] !== 'caido') {\n    salida.push({ json: { ...item.json, mensaje: `🔴 ${nombre} caído: ${url} (${detalle})` } });\n  }\n  estado[url] = 'caido';\n}\nreturn salida;"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a06",
+      "name": "¿Recién cayó?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Solo deja pasar los servicios que ANTES estaban caidos\nconst estado = $getWorkflowStaticData('global');\nconst salida = [];\nfor (const item of $input.all()) {\n  const { nombre, url, detalle } = item.json;\n  if (estado[url] === 'caido') {\n    salida.push({ json: { ...item.json, mensaje: `🟢 ${nombre} recuperado: ${url} (${detalle})` } });\n  }\n  estado[url] = 'arriba';\n}\nreturn salida;"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a07",
+      "name": "¿Se recuperó?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://signal-api:8080/v2/send",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.mensaje, number: '+52TU_NUMERO_BOT', recipients: ['+52NUMERO_DESTINO'] }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a08",
+      "name": "Enviar a Signal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    }
+  ],
+  "connections": {
+    "Cada 5 minutos": {
+      "main": [[{ "node": "Lista de servicios", "type": "main", "index": 0 }]]
+    },
+    "Lista de servicios": {
+      "main": [[{ "node": "Revisar URL", "type": "main", "index": 0 }]]
+    },
+    "Revisar URL": {
+      "main": [[{ "node": "Preparar resultado", "type": "main", "index": 0 }]]
+    },
+    "Preparar resultado": {
+      "main": [[{ "node": "¿Está caído?", "type": "main", "index": 0 }]]
+    },
+    "¿Está caído?": {
+      "main": [
+        [{ "node": "¿Recién cayó?", "type": "main", "index": 0 }],
+        [{ "node": "¿Se recuperó?", "type": "main", "index": 0 }]
+      ]
+    },
+    "¿Recién cayó?": {
+      "main": [[{ "node": "Enviar a Signal", "type": "main", "index": 0 }]]
+    },
+    "¿Se recuperó?": {
+      "main": [[{ "node": "Enviar a Signal", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Chihuahua"
+  },
+  "pinData": {}
+}
