@@ -16,17 +16,23 @@
       "name": "Cada 5 minutos",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [0, 300]
+      "position": [
+        0,
+        300
+      ]
     },
     {
       "parameters": {
-        "jsCode": "// ==========================================\n// EDITA AQUI la lista de servicios a vigilar\n// ==========================================\nconst servicios = [\n  { nombre: 'Sitio web', url: 'https://ejemplo.com' },\n  { nombre: 'API interna', url: 'https://api.ejemplo.com/health' },\n  { nombre: 'Panel admin', url: 'http://192.168.1.50:8080' },\n];\n\nreturn servicios.map(s => ({ json: s }));"
+        "jsCode": "// Si llega desde el comando \"revisar\", corre aunque el monitoreo esté en pausa\nconst entrada = $input.first().json;\nconst pedido = entrada.revisar === true;\nif ($getWorkflowStaticData('global').__pausado && !pedido) return [];\n\n// ==========================================\n// EDITA AQUI la lista de servicios a vigilar\n// ==========================================\nconst servicios = [\n  { nombre: 'Sitio web', url: 'https://ejemplo.com' },\n  { nombre: 'API interna', url: 'https://api.ejemplo.com/health' },\n  { nombre: 'Panel admin', url: 'http://192.168.1.50:8080' },\n];\n\nreturn servicios.map(s => ({ json: { ...s, pedido, responderA: entrada.responderA ?? null } }));"
       },
       "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a02",
       "name": "Lista de servicios",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [220, 300]
+      "position": [
+        220,
+        300
+      ]
     },
     {
       "parameters": {
@@ -45,18 +51,24 @@
       "name": "Revisar URL",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 300],
+      "position": [
+        440,
+        300
+      ],
       "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// Junta el resultado HTTP con el nombre y URL del servicio original\nreturn $input.all().map((item, i) => {\n  const servicio = $('Lista de servicios').itemMatching(i).json;\n  const r = item.json;\n  let codigo = null;\n  let detalle;\n  if (r.error) {\n    const e = r.error;\n    detalle = typeof e === 'string' ? e : (e.code || e.message || JSON.stringify(e));\n  } else {\n    codigo = r.statusCode ?? null;\n    detalle = `código ${codigo}`;\n  }\n  return {\n    json: {\n      nombre: servicio.nombre,\n      url: servicio.url,\n      codigo,\n      detalle,\n      hayError: Boolean(r.error),\n    },\n  };\n});"
+        "jsCode": "// Junta el resultado HTTP con el nombre y URL del servicio original\nconst origen = $('Lista de servicios').itemMatching(0).json;\nconst pedido = origen.pedido === true;          // vino del comando \"revisar\"\nconst responderA = origen.responderA ?? null;\n\nconst resultados = $input.all().map((item, i) => {\n  const servicio = $('Lista de servicios').itemMatching(i).json;\n  const r = item.json;\n  let codigo = null;\n  let detalle;\n  if (r.error) {\n    const e = r.error;\n    detalle = typeof e === 'string' ? e : (e.code || e.message || JSON.stringify(e));\n  } else {\n    codigo = r.statusCode ?? null;\n    detalle = `código ${codigo}`;\n  }\n  return {\n    json: {\n      nombre: servicio.nombre,\n      url: servicio.url,\n      codigo,\n      detalle,\n      hayError: Boolean(r.error),\n      directo: false,\n    },\n  };\n});\n\nfunction resumen(u, pausado) {\n  if (!u) return '📋 Todavía no hay ninguna revisión guardada.';\n  const fecha = new Date(u.fecha).toLocaleString('es-MX', { timeZone: 'America/Chihuahua', dateStyle: 'short', timeStyle: 'short' });\n  const lineas = [`📋 Estado de servicios (${fecha})`];\n  if (u.redCaida) lineas.push('⚠️ En esa revisión no hubo red: ningún servicio respondió.');\n  for (const s of u.servicios) lineas.push(`${s.ok ? '🟢' : '🔴'} ${s.nombre}: ${s.detalle}`);\n  if (pausado) lineas.push('⏸️ El monitoreo automático está en pausa.');\n  return lineas.join('\\n');\n}\n\nconst directo = (mensaje, destino = null) => ({ json: { directo: true, mensaje, responderA: destino } });\nconst estado = $getWorkflowStaticData('global');\n\n// Regla de red local: si TODOS los servicios (2 o más) fallaron sin respuesta HTTP\n// (DNS, sin red, timeout), casi seguro el problema es de esta máquina, no de los servicios.\n// En ese caso no se toca el estado de cada servicio y se manda un solo aviso.\nconst redCaida = resultados.length >= 2 && resultados.every(r => r.json.hayError);\n\n// Guarda la última revisión para el comando \"estado\"\nestado.__ultimo = {\n  fecha: new Date().toISOString(),\n  redCaida,\n  servicios: resultados.map(({ json: s }) => ({\n    nombre: s.nombre,\n    ok: !s.hayError && s.codigo >= 200 && s.codigo < 300,\n    detalle: s.detalle,\n  })),\n};\n\nconst salida = [];\nif (redCaida) {\n  const errores = [...new Set(resultados.map(r => r.json.detalle))].join(', ');\n  const aviso = `⚠️ Posible problema de red local: ningún servicio respondió (${errores}). No se cambió el estado de los servicios.`;\n  if (estado.__redLocal !== 'caida') {\n    estado.__redLocal = 'caida';\n    salida.push(directo(aviso));\n  } else if (pedido) {\n    salida.push(directo(aviso, responderA));\n  }\n  return salida;\n}\n\nif (estado.__redLocal === 'caida') {\n  estado.__redLocal = 'ok';\n  salida.push(directo('✅ Red local recuperada: los servicios vuelven a responder.'));\n}\nif (pedido) salida.push(directo(resumen(estado.__ultimo, estado.__pausado), responderA));\n\nreturn [...salida, ...resultados];"
       },
       "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a04",
       "name": "Preparar resultado",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, 300]
+      "position": [
+        660,
+        300
+      ]
     },
     {
       "parameters": {
@@ -86,7 +98,10 @@
       "name": "¿Está caído?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [880, 300]
+      "position": [
+        1100,
+        400
+      ]
     },
     {
       "parameters": {
@@ -96,7 +111,10 @@
       "name": "¿Recién cayó?",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1100, 200]
+      "position": [
+        1320,
+        300
+      ]
     },
     {
       "parameters": {
@@ -106,7 +124,10 @@
       "name": "¿Se recuperó?",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1100, 420]
+      "position": [
+        1320,
+        500
+      ]
     },
     {
       "parameters": {
@@ -114,7 +135,7 @@
         "url": "http://signal-api:8080/v2/send",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ message: $json.mensaje, number: '+52TU_NUMERO_BOT', recipients: ['+52NUMERO_DESTINO'] }) }}",
+        "jsonBody": "={{ JSON.stringify({ message: $json.mensaje, number: '+52TU_NUMERO_BOT', recipients: [$json.responderA || '+52NUMERO_DESTINO'] }) }}",
         "options": {
           "timeout": 10000
         }
@@ -123,33 +144,246 @@
       "name": "Enviar a Signal",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1340, 300]
+      "position": [
+        1560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7d1c9a52-2222-4b2a-9c3d-5e6f7a8b9c02",
+              "leftValue": "={{ $json.directo === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a09",
+      "name": "¿Mensaje directo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a10",
+      "name": "Comando desde Signal",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Atiende los comandos que llegan desde el flujo \"Receptor de comandos Signal\"\nconst estado = $getWorkflowStaticData('global');\nconst { comando, responderA } = $input.first().json;\n\nfunction resumen(u, pausado) {\n  if (!u) return '📋 Todavía no hay ninguna revisión guardada.';\n  const fecha = new Date(u.fecha).toLocaleString('es-MX', { timeZone: 'America/Chihuahua', dateStyle: 'short', timeStyle: 'short' });\n  const lineas = [`📋 Estado de servicios (${fecha})`];\n  if (u.redCaida) lineas.push('⚠️ En esa revisión no hubo red: ningún servicio respondió.');\n  for (const s of u.servicios) lineas.push(`${s.ok ? '🟢' : '🔴'} ${s.nombre}: ${s.detalle}`);\n  if (pausado) lineas.push('⏸️ El monitoreo automático está en pausa.');\n  return lineas.join('\\n');\n}\n\nlet mensaje;\nswitch (comando) {\n  case 'revisar':\n    return [{ json: { revisar: true, responderA } }];\n  case 'estado':\n    mensaje = resumen(estado.__ultimo, estado.__pausado);\n    break;\n  case 'pausar':\n    estado.__pausado = true;\n    mensaje = '⏸️ Monitoreo pausado. No habrá revisiones automáticas ni alertas hasta que escribas \"reanudar\". \"revisar\" sigue funcionando.';\n    break;\n  case 'reanudar':\n    estado.__pausado = false;\n    mensaje = '▶️ Monitoreo reanudado. La siguiente revisión automática es en menos de 5 minutos.';\n    break;\n  default:\n    mensaje = '🤖 Comandos (escríbelos en tu Nota personal):\\nestado: último resultado de cada servicio\\nrevisar: revisa todo ahora mismo\\npausar: detiene las revisiones automáticas y alertas\\nreanudar: las vuelve a activar\\nayuda: esta lista';\n}\nreturn [{ json: { revisar: false, mensaje, responderA } }];"
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a11",
+      "name": "Ejecutar comando",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "7d1c9a52-3333-4b2a-9c3d-5e6f7a8b9c03",
+              "leftValue": "={{ $json.revisar === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0b6f2a1e-3c4d-4e5f-8a9b-0c1d2e3f4a12",
+      "name": "¿Es revisar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        700
+      ]
     }
   ],
   "connections": {
     "Cada 5 minutos": {
-      "main": [[{ "node": "Lista de servicios", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Lista de servicios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Lista de servicios": {
-      "main": [[{ "node": "Revisar URL", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Revisar URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Revisar URL": {
-      "main": [[{ "node": "Preparar resultado", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Preparar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Preparar resultado": {
-      "main": [[{ "node": "¿Está caído?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "¿Mensaje directo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Está caído?": {
       "main": [
-        [{ "node": "¿Recién cayó?", "type": "main", "index": 0 }],
-        [{ "node": "¿Se recuperó?", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "¿Recién cayó?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Se recuperó?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "¿Recién cayó?": {
-      "main": [[{ "node": "Enviar a Signal", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Enviar a Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Se recuperó?": {
-      "main": [[{ "node": "Enviar a Signal", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Enviar a Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Mensaje directo?": {
+      "main": [
+        [
+          {
+            "node": "Enviar a Signal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Está caído?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Comando desde Signal": {
+      "main": [
+        [
+          {
+            "node": "Ejecutar comando",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar comando": {
+      "main": [
+        [
+          {
+            "node": "¿Es revisar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Es revisar?": {
+      "main": [
+        [
+          {
+            "node": "Lista de servicios",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enviar a Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {

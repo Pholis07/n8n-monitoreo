@@ -2,7 +2,9 @@
 
 Proyecto de infraestructura local: una instancia de [n8n](https://n8n.io) corriendo en contenedores, con PostgreSQL como base de datos, y un flujo que revisa cada 5 minutos si una lista de servicios web responde. Si alguno se cae (o vuelve a funcionar), manda un mensaje a Signal.
 
-Solo avisa cuando el estado cambia. Si un servicio sigue caído, no vas a recibir el mismo mensaje cada 5 minutos.
+Solo avisa cuando el estado cambia. Si un servicio sigue caído, no vas a recibir el mismo mensaje cada 5 minutos. Además puedes controlarlo escribiéndole comandos por Signal (`estado`, `revisar`, `pausar`, `reanudar`, `ayuda`).
+
+No necesita IP pública ni abrir puertos: todas las conexiones salen de tu máquina, así que funciona igual aunque cambies de red o de ubicación.
 
 ## Qué hay en este directorio
 
@@ -12,20 +14,25 @@ Solo avisa cuando el estado cambia. Si un servicio sigue caído, no vas a recibi
 | `.env` | Contraseñas y llave de cifrado (no se sube a git) |
 | `.env.example` | Plantilla del `.env` sin secretos |
 | `monitor-servicios.json` | El flujo de monitoreo, listo para importar en n8n |
+| `receptor-comandos-signal.json` | Flujo que recibe tus comandos de Signal y se los pasa al monitor |
 
 ## Cómo está armado
 
 ```
-Cada 5 min ─► Lista de servicios ─► Revisar URL ─► Preparar resultado ─► ¿Está caído?
-                                                                          │ sí      │ no
-                                                                  ¿Recién cayó?  ¿Se recuperó?
-                                                                          └────┬────┘
-                                                                        Enviar a Signal
+Cada 5 min ─► Lista de servicios ─► Revisar URL ─► Preparar resultado ─► ¿Mensaje directo?
+                     ▲                                                   │ sí      │ no
+                     │ "revisar"                                         │    ¿Está caído?
+                     │                                                   │    │ sí      │ no
+Comando desde ─► Ejecutar comando ─► ¿Es revisar?                        │ ¿Recién cayó?  ¿Se recuperó?
+Signal                                   │ no (estado, pausar, ayuda...) │    └────┬────┘
+                                         └───────────────────────────────┴─► Enviar a Signal
 ```
+
+"Mensaje directo" son los avisos que no dependen de un servicio en particular: el aviso de problema de red local y el resumen que pide el comando `revisar`.
 
 - **postgres** (`postgres:17-alpine`): guarda los flujos, credenciales y ejecuciones de n8n. No se expone al host, solo n8n lo ve.
 - **n8n**: la interfaz web en `http://localhost:5678`.
-- **signal-api** ([signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)): n8n no trae un nodo de Signal, así que este contenedor ofrece una API HTTP para mandar mensajes. Solo escucha en `127.0.0.1:8080`.
+- **signal-api** ([signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)): n8n no trae un nodo de Signal, así que este contenedor ofrece una API HTTP para mandar mensajes. Solo escucha en `127.0.0.1:8080`. Los mensajes que recibe los reenvía al webhook de n8n (`RECEIVE_WEBHOOK_URL`) para los comandos.
 
 Todos los datos viven en volúmenes nombrados: `n8n_postgres17_data`, `n8n_n8n_data` y `n8n_signal_data`.
 
@@ -139,6 +146,39 @@ Los números van en formato internacional: `+52` seguido de los 10 dígitos.
 
 No hace falta crear credenciales en n8n: signal-api está en la red interna de los contenedores y no pide autenticación.
 
+## Comandos desde Signal
+
+Escribe cualquiera de estas palabras en tu **Nota personal** de Signal (el chat contigo mismo) y el bot te contesta ahí:
+
+| Comando | Qué hace |
+|---|---|
+| `estado` | Te manda el último resultado de cada servicio, sin revisar de nuevo |
+| `revisar` | Revisa todo en ese momento y te manda el resumen (funciona aunque esté en pausa) |
+| `pausar` | Detiene las revisiones automáticas y las alertas. Útil si vas a apagar algo a propósito |
+| `reanudar` | Vuelve a activar el monitoreo automático |
+| `ayuda` | Lista de comandos |
+
+No importan mayúsculas ni una `/` al inicio (`/Estado` también funciona).
+
+### Instalar el receptor de comandos
+
+1. Importa `monitor-servicios.json` como se explicó arriba y copia su ID. Es la parte final de la URL cuando lo tienes abierto: `http://localhost:5678/workflow/`**`ESTE_ID`**.
+2. Importa `receptor-comandos-signal.json` en otro flujo nuevo.
+3. Abre el nodo **Ejecutar en el monitor** y cambia `ID_DEL_FLUJO_MONITOR` por ese ID (o elige el monitor de la lista).
+4. Publica los dos flujos.
+
+El `docker-compose.yml` ya tiene `RECEIVE_WEBHOOK_URL` apuntando al receptor, así que no hay que hacer nada más.
+
+### Privacidad
+
+signal-api recibe **todo** lo que llega a tu cuenta (tus chats, confirmaciones de lectura, "escribiendo..."), y todo eso pasa por el webhook. Por eso:
+
+- El nodo **Filtrar comando** descarta todo lo que no sea uno de los comandos escrito por ti en tu Nota personal.
+- El receptor tiene desactivado el guardado de ejecuciones exitosas, para que tus mensajes no queden almacenados en la base de datos de n8n.
+- Solo lo ya filtrado (el comando y quién lo pidió) llega al flujo del monitor, que sí guarda su historial.
+
+Si quieres aceptar comandos desde otro número, agrégalo a la lista `AUTORIZADOS` dentro de **Filtrar comando**.
+
 ## Agregar más servicios
 
 Todo está en el nodo **Lista de servicios**. Solo agrega una línea por servicio:
@@ -166,7 +206,17 @@ Los nodos **¿Recién cayó?** y **¿Se recuperó?** guardan el último estado d
 - Estaba caído y ahora responde bien: manda 🟢.
 - Cualquier otro caso: no manda nada.
 
-Ojo: n8n **solo guarda el Static Data en ejecuciones de producción**, es decir, cuando el flujo está activo y lo dispara el Schedule. Si lo pruebas con **Execute Workflow** a mano, va a mandar la alerta cada vez porque no recuerda el estado anterior. Eso es normal.
+Ojo: n8n **solo guarda el Static Data en ejecuciones de producción**, es decir, cuando el flujo está activo y lo disparan el Schedule o un comando de Signal. Si lo pruebas con **Execute Workflow** a mano, va a mandar la alerta cada vez porque no recuerda el estado anterior. Eso es normal.
+
+### Regla de problema de red local
+
+Si **todos** los servicios (2 o más) fallan al mismo tiempo sin respuesta HTTP (error de DNS, sin red, timeout), lo más probable es que el problema sea de tu máquina o tu red, no de los servicios. En ese caso:
+
+- Manda un solo aviso: "⚠️ Posible problema de red local".
+- No cambia el estado de ningún servicio, así que cuando vuelve la red no recibes un montón de 🟢 falsos.
+- Cuando la red regresa, manda "✅ Red local recuperada".
+
+Si solo falla uno, o alguno responde con un código de error (503, 404...), se trata como una caída normal. Si no hay nada de internet, el aviso no puede salir hasta que vuelva la conexión.
 
 ## Respaldos
 

@@ -1,0 +1,86 @@
+{
+  "name": "Receptor de comandos Signal",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "signal-comandos",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "5c1e7b20-4d3a-4f6b-9e8c-1a2b3c4d5e01",
+      "name": "Mensaje de Signal",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "5c1e7b20-4d3a-4f6b-9e8c-1a2b3c4d5e99"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recibe TODO lo que le llega a signal-api (tus chats, confirmaciones de lectura, etc.).\n// Solo deja pasar comandos que tú escribiste en tu \"Nota personal\", o que llegan\n// de un número en AUTORIZADOS. Este flujo no guarda ejecuciones, para no almacenar\n// tus mensajes privados.\nconst AUTORIZADOS = [];   // ej. ['+5216141234567'] para aceptar comandos de otro número\nconst COMANDOS = ['estado', 'revisar', 'pausar', 'reanudar', 'ayuda'];\n\nconst salida = [];\nfor (const item of $input.all()) {\n  try {\n    const p = item.json.body ?? item.json;\n    const env = p.envelope ?? p.params?.envelope;\n    const cuenta = p.account ?? p.params?.account;\n    if (!env || !cuenta) continue;\n\n    const desde = env.sourceNumber ?? env.source;\n    const enviado = env.syncMessage?.sentMessage;\n    let texto = null;\n    let responderA = null;\n\n    if (enviado && desde === cuenta &&\n        ((enviado.destinationNumber ?? enviado.destination) === cuenta ||\n         (enviado.destinationUuid && enviado.destinationUuid === env.sourceUuid))) {\n      texto = enviado.message;          // escrito por ti en \"Nota personal\"\n      responderA = cuenta;\n    } else if (env.dataMessage && AUTORIZADOS.includes(desde)) {\n      texto = env.dataMessage.message;\n      responderA = desde;\n    }\n    if (typeof texto !== 'string') continue;\n\n    const comando = texto.trim().toLowerCase().replace(/^[\\/!]/, '');\n    if (COMANDOS.includes(comando)) salida.push({ json: { comando, responderA } });\n  } catch (e) {\n    // Mensaje con formato inesperado: se ignora\n  }\n}\nreturn salida;"
+      },
+      "id": "5c1e7b20-4d3a-4f6b-9e8c-1a2b3c4d5e02",
+      "name": "Filtrar comando",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "ID_DEL_FLUJO_MONITOR",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {}
+      },
+      "id": "5c1e7b20-4d3a-4f6b-9e8c-1a2b3c4d5e03",
+      "name": "Ejecutar en el monitor",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        440,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Mensaje de Signal": {
+      "main": [
+        [
+          {
+            "node": "Filtrar comando",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filtrar comando": {
+      "main": [
+        [
+          {
+            "node": "Ejecutar en el monitor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Chihuahua",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "pinData": {}
+}

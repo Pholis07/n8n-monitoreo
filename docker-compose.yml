@@ -53,6 +53,8 @@ services:
     environment:
       MODE: json-rpc
       TZ: America/Chihuahua
+      # Reenvía los mensajes recibidos al flujo "Receptor de comandos Signal"
+      RECEIVE_WEBHOOK_URL: http://n8n:5678/webhook/signal-comandos
     # Solo en localhost: sirve para vincular el número (QR) y para pruebas.
     # n8n llega a este servicio por la red interna en http://signal-api:8080
     ports:
