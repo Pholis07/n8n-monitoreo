@@ -62,6 +62,11 @@ services:
       - "127.0.0.1:8095:8080"
     volumes:
       - signal_data:/home/.local/share/signal-cli
+    # signal-cli escribe en su log el texto de TODOS los mensajes que recibe
+    # (también los de tus chats). Sin logs, no quedan guardados en ningún lado.
+    # Para depurar, comenta estas dos líneas un rato y vuelve a ponerlas.
+    logging:
+      driver: none
 
 volumes:
   postgres17_data:

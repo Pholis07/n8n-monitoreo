@@ -242,6 +242,7 @@ signal-api recibe **todo** lo que llega a tu cuenta (tus chats, confirmaciones d
 
 - **signal-control** descarta todo lo que no sea un comando escrito por ti en tu Nota personal, antes de que llegue a n8n. Nunca escribe el contenido de un mensaje en su log.
 - El nodo **Filtrar comando** del receptor vuelve a revisar lo mismo, por si algo le llega directo al webhook.
+- signal-api tiene los logs desactivados (`logging: driver: none`), porque signal-cli escribe en su log el texto de todo lo que recibe y quedaría guardado en el journal del sistema.
 - El receptor no guarda sus ejecuciones, y `EXECUTIONS_DATA_PRUNE_HARD_DELETE_INTERVAL: 1` hace que n8n las borre de verdad en un minuto.
 - Solo el comando y quién lo pidió llegan al flujo del monitor, que sí guarda su historial.
 
