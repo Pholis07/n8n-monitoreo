@@ -2,7 +2,7 @@
 
 Proyecto de infraestructura local: una instancia de [n8n](https://n8n.io) corriendo en contenedores, con PostgreSQL como base de datos, y un flujo que revisa cada 5 minutos si una lista de servicios web responde. Si alguno se cae (o vuelve a funcionar), manda un mensaje a Signal.
 
-Solo avisa cuando el estado cambia. Si un servicio sigue caído, no vas a recibir el mismo mensaje cada 5 minutos. Además puedes controlarlo escribiéndole comandos por Signal (`estado`, `revisar`, `pausar`, `reanudar`, `ayuda`), e incluso apagar y encender n8n (`apagar`, `encender`).
+Solo avisa cuando el estado cambia. Si un servicio sigue caído, no vas a recibir el mismo mensaje cada 5 minutos. Además puedes controlarlo escribiéndole comandos por Signal (`estado`, `revisar`, `pausar`, `reanudar`, `ayuda`), e incluso encender y apagar n8n y tus otros contenedores, por ejemplo una VM de Windows (`encender windows`).
 
 No necesita IP pública ni abrir puertos: todas las conexiones salen de tu máquina, así que funciona igual aunque cambies de red o de ubicación.
 
@@ -15,7 +15,8 @@ No necesita IP pública ni abrir puertos: todas las conexiones salen de tu máqu
 | `.env.example` | Plantilla del `.env` sin secretos |
 | `monitor-servicios.json` | El flujo de monitoreo, listo para importar en n8n |
 | `receptor-comandos-signal.json` | Flujo que recibe tus comandos de Signal y se los pasa al monitor |
-| `control/` | Servicio del host que lee los mensajes de Signal, atiende `encender`/`apagar` y pasa el resto a n8n |
+| `control/` | Servicio del host que lee los mensajes de Signal, enciende y apaga contenedores y pasa el resto a n8n |
+| `control/proyectos.example.json` | Plantilla de los proyectos que puedes encender y apagar (cópiala a `proyectos.json`) |
 
 ## Cómo está armado
 
@@ -40,7 +41,7 @@ Signal                                   │ no (estado, pausar, ayuda...) │  
 
 - **postgres** (`postgres:17-alpine`): guarda los flujos, credenciales y ejecuciones de n8n. No se expone al host, solo n8n lo ve.
 - **n8n**: la interfaz web en `http://localhost:5678`.
-- **signal-api** ([signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)): n8n no trae un nodo de Signal, así que este contenedor ofrece una API HTTP para mandar mensajes. Solo escucha en `127.0.0.1:8080`.
+- **signal-api** ([signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)): n8n no trae un nodo de Signal, así que este contenedor ofrece una API HTTP para mandar mensajes. Solo escucha en `127.0.0.1:8095` (el puerto 8080 queda libre para tus otros proyectos).
 - **signal-control** (`control/signal-control.py`): servicio de systemd de tu usuario, fuera de los contenedores. Lee los mensajes de signal-api por websocket y es el único que puede encender o apagar n8n.
 
 n8n también escucha solo en `127.0.0.1:5678`: nada del proyecto queda expuesto a la red.
@@ -110,11 +111,11 @@ Necesitas un número de Signal desde el cual el bot mande los mensajes. Hay dos 
 
 ### Opción A: vincular tu propio número (la más rápida)
 
-1. Abre en el navegador: `http://localhost:8080/v1/qrcodelink?device_name=n8n`
+1. Abre en el navegador: `http://localhost:8095/v1/qrcodelink?device_name=n8n`
 2. En tu teléfono: Signal, Ajustes, Dispositivos vinculados, el botón **+**, y escanea el QR.
 3. Verifica que quedó registrado:
    ```bash
-   curl http://localhost:8080/v1/accounts
+   curl http://localhost:8095/v1/accounts
    ```
 
 Detalle a tomar en cuenta: si el bot manda mensajes desde tu número hacia tu mismo número, llegan a "Nota personal" y normalmente **no suenan como notificación**, porque Signal los trata como mensajes que tú mismo enviaste. Para recibir alertas con sonido, usa la opción B o manda las alertas al número de otra persona.
@@ -129,10 +130,10 @@ Con un chip extra o un número que pueda recibir SMS o llamada:
 #    y copia el enlace "signalcaptcha://..." que te da.
 curl -X POST -H "Content-Type: application/json" \
   -d '{"captcha":"signalcaptcha://PEGA_AQUI"}' \
-  'http://localhost:8080/v1/register/+52NUMERO_BOT'
+  'http://localhost:8095/v1/register/+52NUMERO_BOT'
 
 # 2. Confirma con el código que te llegó por SMS
-curl -X POST 'http://localhost:8080/v1/register/+52NUMERO_BOT/verify/123456'
+curl -X POST 'http://localhost:8095/v1/register/+52NUMERO_BOT/verify/123456'
 ```
 
 ### Probar que Signal manda mensajes
@@ -140,7 +141,7 @@ curl -X POST 'http://localhost:8080/v1/register/+52NUMERO_BOT/verify/123456'
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d '{"message":"Prueba desde n8n","number":"+52NUMERO_BOT","recipients":["+52NUMERO_DESTINO"]}' \
-  http://localhost:8080/v2/send
+  http://localhost:8095/v2/send
 ```
 
 Los números van en formato internacional: `+52` seguido de los 10 dígitos.
@@ -169,6 +170,8 @@ Escribe cualquiera de estas palabras en tu **Nota personal** de Signal (el chat 
 | `reanudar` | Vuelve a activar el monitoreo automático |
 | `apagar` | Apaga n8n y Postgres. signal-api y signal-control siguen prendidos para escucharte |
 | `encender` | Los vuelve a prender y te avisa cuando n8n ya responde |
+| `encender windows` | Enciende otro proyecto de `proyectos.json` (igual con `apagar windows`) |
+| `contenedores` | Qué proyectos están prendidos: 🟢 todo, 🟡 a medias, ⚪ apagado |
 | `ayuda` | Lista de comandos |
 
 Mientras n8n está apagado **no hay monitoreo**. Si mandas otro comando en ese momento, te contesta que está apagado.
@@ -194,11 +197,44 @@ No importan mayúsculas ni una `/` al inicio (`/Estado` también funciona).
 
    Con `loginctl enable-linger $USER` (ver arriba) arranca solo al prender la máquina, aunque no hayas iniciado sesión.
 
+### Tus otros proyectos (proyectos.json)
+
+signal-control puede encender y apagar cualquier contenedor de tu máquina, no solo n8n. Se configuran en `control/proyectos.json` (no se sube a git):
+
+```bash
+cp control/proyectos.example.json control/proyectos.json
+```
+
+```json
+{
+  "windows": {
+    "dir": "~/docker/windows",
+    "info": "RDP: localhost:3389 · Web: http://localhost:8006",
+    "nota": "Windows tarda 1 o 2 minutos más en terminar de arrancar."
+  },
+  "clase": {
+    "contenedores": ["clase-mysql", "clase-phpmyadmin"],
+    "listo": "http://127.0.0.1:8081"
+  }
+}
+```
+
+| Campo | Para qué |
+|---|---|
+| `dir` | Carpeta con `docker-compose.yml`. Usa `docker compose up -d` / `stop` ahí |
+| `contenedores` | Si no hay compose: nombres de contenedores sueltos. Usa `docker start` / `stop` |
+| `info` | Texto que te manda al encender (dónde conectarte) |
+| `nota` | Aviso extra al encender |
+| `listo` | URL que debe responder antes de decirte "encendido" |
+| `ignorar` | Contenedores que corren una vez y terminan (por ejemplo un `composer`), para que no cuenten como apagados |
+
+El nombre del proyecto es lo que escribes: `encender clase`, `apagar clase`. El archivo se vuelve a leer en cada comando, así que no hace falta reiniciar el servicio al editarlo.
+
 ### Por qué un servicio fuera de los contenedores
 
 Para encender n8n algo tiene que estar escuchando mientras n8n está apagado. Ese algo es signal-api (que recibe los mensajes) más signal-control, que corre directamente en el host porque es quien ejecuta `docker compose`.
 
-signal-control se conecta **hacia** signal-api por `127.0.0.1:8080`, en vez de que signal-api le mande los mensajes. Así no hay que abrir ningún puerto ni darle a un contenedor acceso al socket de Podman/Docker.
+signal-control se conecta **hacia** signal-api por `127.0.0.1:8095`, en vez de que signal-api le mande los mensajes. Así no hay que abrir ningún puerto ni darle a un contenedor acceso al socket de Podman/Docker.
 
 ### Privacidad
 

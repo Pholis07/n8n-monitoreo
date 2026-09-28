@@ -1,0 +1,19 @@
+{
+  "_comentario": "Copia este archivo a proyectos.json. Cada proyecto usa 'dir' (carpeta con docker-compose.yml) o 'contenedores' (nombres sueltos). 'listo' (opcional) es una URL que debe responder para dar el proyecto por encendido. 'ignorar' (opcional) son contenedores que corren una vez y terminan.",
+  "windows": {
+    "dir": "~/docker/windows",
+    "info": "RDP: localhost:3389 · Web: http://localhost:8006",
+    "nota": "Windows tarda 1 o 2 minutos más en terminar de arrancar."
+  },
+  "web": {
+    "dir": "~/docker/nginx-php-mysql",
+    "info": "http://localhost:8000",
+    "ignorar": ["nginx-php-mysql-composer-1"],
+    "listo": "http://127.0.0.1:8000"
+  },
+  "clase": {
+    "contenedores": ["clase-mysql", "clase-phpmyadmin"],
+    "info": "MySQL: localhost:3307 · phpMyAdmin: http://localhost:8081",
+    "listo": "http://127.0.0.1:8081"
+  }
+}

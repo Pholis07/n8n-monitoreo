@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Servicio de control por Signal para el stack de n8n.
+"""Servicio de control por Signal para n8n y tus otros contenedores.
 
 Corre en el host (no en un contenedor) como servicio de systemd del usuario.
-Se conecta por websocket a signal-api (127.0.0.1:8080), lee los mensajes que
-llegan a tu cuenta y:
+Se conecta por websocket a signal-api (127.0.0.1:8095), lee los mensajes que
+llegan a tu cuenta y atiende los comandos que escribes en tu "Nota personal":
 
-- "encender": levanta postgres y n8n con docker compose.
-- "apagar":   detiene n8n y postgres (signal-api y este servicio siguen vivos).
-- estado, revisar, pausar, reanudar, ayuda: se los pasa a n8n por el webhook
-  del flujo "Receptor de comandos Signal". Si n8n está apagado, te avisa.
+- encender / apagar:              n8n y Postgres.
+- encender X / apagar X:          el proyecto X de control/proyectos.json.
+- contenedores:                   qué proyectos están prendidos.
+- ayuda:                          lista de comandos.
+- estado, revisar, pausar, reanudar: se los pasa a n8n por el webhook del flujo
+  "Receptor de comandos Signal". Si n8n está apagado, te avisa.
 
 Todo lo demás (tus chats, confirmaciones de lectura...) se descarta aquí y no
 llega a n8n. Nunca se escribe el contenido de un mensaje en el log.
@@ -28,21 +30,38 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-SIGNAL_API = os.environ.get("SIGNAL_API", "http://127.0.0.1:8080")
+SIGNAL_API = os.environ.get("SIGNAL_API", "http://127.0.0.1:8095")
 N8N_URL = os.environ.get("N8N_URL", "http://127.0.0.1:5678")
 N8N_WEBHOOK = f"{N8N_URL}/webhook/signal-comandos"
 PROYECTO = Path(os.environ.get("PROYECTO", Path(__file__).resolve().parent.parent))
+ARCHIVO_PROYECTOS = Path(__file__).resolve().parent / "proyectos.json"
 # Números extra que pueden mandar comandos, separados por coma (ej. +5216141234567)
 AUTORIZADOS = {n.strip() for n in os.environ.get("AUTORIZADOS", "").split(",") if n.strip()}
 
-COMANDOS_CONTROL = {"encender", "apagar"}
-COMANDOS_N8N = {"estado", "revisar", "pausar", "reanudar", "ayuda"}
+COMANDOS_N8N = {"estado", "revisar", "pausar", "reanudar"}
+COMANDOS_AQUI = {"encender", "apagar", "contenedores", "ayuda"}
 
-bloqueo = threading.Lock()  # un encender/apagar a la vez
+bloqueos = {}  # un encender/apagar a la vez por proyecto
 
 
 def log(texto):
     print(texto, flush=True)
+
+
+def bloqueo(nombre):
+    return bloqueos.setdefault(nombre, threading.Lock())
+
+
+def cargar_proyectos():
+    """Se lee en cada comando, así puedes editar proyectos.json sin reiniciar el servicio."""
+    try:
+        datos = json.loads(ARCHIVO_PROYECTOS.read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError as e:
+        log(f"proyectos.json tiene un error: {e}")
+        return {}
+    return {k.lower(): v for k, v in datos.items() if not k.startswith("_") and isinstance(v, dict)}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -62,6 +81,17 @@ def responder(cuenta, destino, mensaje):
         log(f"No se pudo enviar la respuesta por Signal: {e}")
 
 
+def responde(url, timeout=3):
+    """True si la URL contesta algo (cualquier código HTTP cuenta)."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
 def n8n_arriba():
     try:
         with urllib.request.urlopen(f"{N8N_URL}/healthz", timeout=3) as r:
@@ -70,13 +100,14 @@ def n8n_arriba():
         return False
 
 
-# ---------------------------------------------------------------- comandos
+# ---------------------------------------------------------------- lectura de comandos
 
 def leer_comando(msg, cuenta):
-    """Regresa (comando, responderA) si el mensaje es un comando válido, si no (None, None)."""
+    """Regresa (comando, argumento, responderA) si el mensaje es un comando, si no (None, None, None)."""
+    nada = (None, None, None)
     env = msg.get("envelope") or (msg.get("params") or {}).get("envelope")
     if not isinstance(env, dict):
-        return None, None
+        return nada
     desde = env.get("sourceNumber") or env.get("source")
     enviado = (env.get("syncMessage") or {}).get("sentMessage")
     texto = responder_a = None
@@ -90,27 +121,129 @@ def leer_comando(msg, cuenta):
         texto, responder_a = env["dataMessage"].get("message"), desde
 
     if not isinstance(texto, str):
-        return None, None
-    comando = texto.strip().lower().lstrip("/!")
-    if comando in COMANDOS_CONTROL | COMANDOS_N8N:
-        return comando, responder_a
-    return None, None
+        return nada
+    palabras = texto.strip().lower().lstrip("/!").split()
+    if not palabras or len(palabras) > 2:
+        return nada
+    comando = palabras[0]
+    argumento = palabras[1] if len(palabras) == 2 else None
+    if comando in COMANDOS_N8N | COMANDOS_AQUI and (argumento is None or comando in ("encender", "apagar")):
+        return comando, argumento, responder_a
+    return nada
 
 
-def compose(*args):
-    r = subprocess.run(["docker", "compose", *args], cwd=PROYECTO,
-                       capture_output=True, text=True, timeout=300)
+# ---------------------------------------------------------------- contenedores
+
+def docker(*args, cwd=None, timeout=300):
+    r = subprocess.run(["docker", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
-        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1])
+        salida = (r.stderr or r.stdout).strip().splitlines()
+        raise RuntimeError(salida[-1] if salida else f"docker {' '.join(args)} falló")
+    return r.stdout
 
 
-def encender(cuenta, destino):
-    with bloqueo:
+def carpeta(p):
+    return Path(os.path.expanduser(p["dir"])) if p.get("dir") else None
+
+
+def contenedores_de(p):
+    """Lista de (nombre, corriendo) de un proyecto."""
+    filtro = (["--filter", f"label=com.docker.compose.project.working_dir={carpeta(p)}"]
+              if carpeta(p) else [])
+    salida = docker("ps", "-a", *filtro, "--format", "{{.Names}}\t{{.State}}", timeout=30)
+    todos = [l.split("\t") for l in salida.splitlines() if "\t" in l]
+    if not carpeta(p):
+        todos = [c for c in todos if c[0] in p.get("contenedores", [])]
+    ignorar = set(p.get("ignorar", []))   # contenedores que corren una vez y terminan
+    return [(n, e == "running") for n, e in todos if n not in ignorar]
+
+
+def encender_proyecto(nombre, p, cuenta, destino):
+    with bloqueo(nombre):
+        try:
+            if all(corre for _, corre in contenedores_de(p) or [("", False)]):
+                return responder(cuenta, destino, f"✅ {nombre} ya estaba encendido. {p.get('info', '')}".strip())
+            responder(cuenta, destino, f"⏳ Encendiendo {nombre}...")
+            if carpeta(p):
+                docker("compose", "up", "-d", cwd=carpeta(p))
+            else:
+                docker("start", *p["contenedores"])
+        except Exception as e:
+            log(f"encender {nombre} falló: {e}")
+            return responder(cuenta, destino, f"❌ No se pudo encender {nombre}: {e}")
+        if p.get("listo"):
+            for _ in range(60):
+                if responde(p["listo"]):
+                    break
+                time.sleep(2)
+            else:
+                return responder(cuenta, destino, f"⚠️ {nombre} arrancó pero {p['listo']} no responde después de 2 minutos.")
+        log(f"{nombre} encendido")
+        extra = " ".join(x for x in (p.get("info"), p.get("nota")) if x)
+        responder(cuenta, destino, f"✅ {nombre} encendido. {extra}".strip())
+
+
+def apagar_proyecto(nombre, p, cuenta, destino):
+    with bloqueo(nombre):
+        try:
+            if not any(corre for _, corre in contenedores_de(p)):
+                return responder(cuenta, destino, f"⏹️ {nombre} ya estaba apagado.")
+            responder(cuenta, destino, f"⏳ Apagando {nombre}...")
+            if carpeta(p):
+                docker("compose", "stop", cwd=carpeta(p))
+            else:
+                docker("stop", *p["contenedores"])
+        except Exception as e:
+            log(f"apagar {nombre} falló: {e}")
+            return responder(cuenta, destino, f"❌ No se pudo apagar {nombre}: {e}")
+        log(f"{nombre} apagado")
+        responder(cuenta, destino, f"⏹️ {nombre} apagado.")
+
+
+def lista_contenedores(cuenta, destino):
+    lineas = ["📦 Proyectos:"]
+    lineas.append(f"{'🟢' if n8n_arriba() else '⚪'} n8n (monitoreo)")
+    for nombre, p in cargar_proyectos().items():
+        try:
+            cs = contenedores_de(p)
+        except Exception as e:
+            lineas.append(f"❓ {nombre}: {e}")
+            continue
+        prendidos = sum(1 for _, corre in cs if corre)
+        icono = "🟢" if cs and prendidos == len(cs) else ("🟡" if prendidos else "⚪")
+        detalle = f" ({prendidos}/{len(cs)})" if len(cs) > 1 else ""
+        lineas.append(f"{icono} {nombre}{detalle}" + (f": {p['info']}" if prendidos and p.get("info") else ""))
+    lineas.append("🟢 prendido · 🟡 a medias · ⚪ apagado")
+    responder(cuenta, destino, "\n".join(lineas))
+
+
+def ayuda(cuenta, destino):
+    nombres = ", ".join(cargar_proyectos()) or "(ninguno en proyectos.json)"
+    responder(cuenta, destino, "\n".join([
+        "🤖 Comandos (escríbelos en tu Nota personal):",
+        "estado: último resultado de cada servicio",
+        "revisar: revisa todo ahora mismo",
+        "pausar / reanudar: detiene o reactiva el monitoreo",
+        "apagar / encender: apaga o prende n8n",
+        "encender X / apagar X: prende o apaga un proyecto",
+        "contenedores: qué está prendido",
+        f"Proyectos: {nombres}",
+    ]))
+
+
+# ---------------------------------------------------------------- n8n
+
+def compose_n8n(*args):
+    docker("compose", *args, cwd=PROYECTO)
+
+
+def encender_n8n(cuenta, destino):
+    with bloqueo("n8n"):
         if n8n_arriba():
             return responder(cuenta, destino, "✅ n8n ya estaba encendido.")
         responder(cuenta, destino, "⏳ Encendiendo n8n y Postgres...")
         try:
-            compose("up", "-d", "postgres", "n8n")
+            compose_n8n("up", "-d", "postgres", "n8n")
         except Exception as e:
             log(f"encender falló: {e}")
             return responder(cuenta, destino, f"❌ No se pudo encender: {e}")
@@ -122,10 +255,10 @@ def encender(cuenta, destino):
         responder(cuenta, destino, "⚠️ Los contenedores arrancaron pero n8n no responde después de 2 minutos. Revisa: docker compose logs n8n")
 
 
-def apagar(cuenta, destino):
-    with bloqueo:
+def apagar_n8n(cuenta, destino):
+    with bloqueo("n8n"):
         try:
-            compose("stop", "n8n", "postgres")
+            compose_n8n("stop", "n8n", "postgres")
         except Exception as e:
             log(f"apagar falló: {e}")
             return responder(cuenta, destino, f"❌ No se pudo apagar: {e}")
@@ -141,17 +274,34 @@ def pasar_a_n8n(msg, cuenta, comando, destino):
         responder(cuenta, destino, '💤 n8n está apagado. Escribe "encender" para prenderlo.')
 
 
+# ---------------------------------------------------------------- despacho
+
+def en_hilo(funcion, *args):
+    threading.Thread(target=funcion, args=args, daemon=True).start()
+
+
 def atender(msg, cuenta):
-    comando, destino = leer_comando(msg, cuenta)
+    comando, argumento, destino = leer_comando(msg, cuenta)
     if not comando:
         return
-    log(f"comando recibido: {comando}")
-    if comando == "encender":
-        threading.Thread(target=encender, args=(cuenta, destino), daemon=True).start()
-    elif comando == "apagar":
-        threading.Thread(target=apagar, args=(cuenta, destino), daemon=True).start()
-    else:
-        pasar_a_n8n(msg, cuenta, comando, destino)
+    log(f"comando recibido: {comando}" + (f" {argumento}" if argumento else ""))
+
+    if comando in COMANDOS_N8N:
+        return pasar_a_n8n(msg, cuenta, comando, destino)
+    if comando == "ayuda":
+        return en_hilo(ayuda, cuenta, destino)
+    if comando == "contenedores":
+        return en_hilo(lista_contenedores, cuenta, destino)
+
+    # encender / apagar
+    if argumento in (None, "n8n"):
+        return en_hilo(encender_n8n if comando == "encender" else apagar_n8n, cuenta, destino)
+    proyectos = cargar_proyectos()
+    if argumento not in proyectos:
+        nombres = ", ".join(["n8n", *proyectos])
+        return responder(cuenta, destino, f"🤷 No conozco el proyecto \"{argumento}\". Disponibles: {nombres}")
+    funcion = encender_proyecto if comando == "encender" else apagar_proyecto
+    en_hilo(funcion, argumento, proyectos[argumento], cuenta, destino)
 
 
 # ---------------------------------------------------------------- websocket mínimo (RFC 6455)

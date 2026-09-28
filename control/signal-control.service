@@ -1,5 +1,5 @@
 [Unit]
-Description=Control del stack de n8n por Signal (encender/apagar)
+Description=Control por Signal de n8n y otros contenedores (encender/apagar)
 After=podman-restart.service
 
 [Service]
