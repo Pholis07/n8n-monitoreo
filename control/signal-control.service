@@ -1,0 +1,16 @@
+[Unit]
+Description=Control del stack de n8n por Signal (encender/apagar)
+After=podman-restart.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/n8n
+Environment=DOCKER_HOST=unix://%t/podman/podman.sock
+Environment=PROYECTO=%h/n8n
+# Environment=AUTORIZADOS=+5216141234567
+ExecStart=/usr/bin/python3 %h/n8n/control/signal-control.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

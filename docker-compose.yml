@@ -24,7 +24,7 @@ services:
     container_name: n8n
     restart: unless-stopped
     ports:
-      - "5678:5678"
+      - "127.0.0.1:5678:5678"
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -38,6 +38,8 @@ services:
       N8N_PROTOCOL: http
       N8N_SECURE_COOKIE: "false"
       WEBHOOK_URL: http://localhost:5678/
+      # Borra de verdad cada minuto las ejecuciones que no se guardan (receptor de Signal)
+      EXECUTIONS_DATA_PRUNE_HARD_DELETE_INTERVAL: 1
       GENERIC_TIMEZONE: America/Chihuahua
       TZ: America/Chihuahua
     volumes:
@@ -53,9 +55,8 @@ services:
     environment:
       MODE: json-rpc
       TZ: America/Chihuahua
-      # Reenvía los mensajes recibidos al flujo "Receptor de comandos Signal"
-      RECEIVE_WEBHOOK_URL: http://n8n:5678/webhook/signal-comandos
-    # Solo en localhost: sirve para vincular el número (QR) y para pruebas.
+    # Solo en localhost: para vincular el número (QR) y para el servicio de control
+    # (control/signal-control.py), que lee los mensajes por websocket.
     # n8n llega a este servicio por la red interna en http://signal-api:8080
     ports:
       - "127.0.0.1:8080:8080"
